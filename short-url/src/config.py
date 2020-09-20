@@ -1,0 +1,11 @@
+backlog = 2048
+worker_class = 'sync'
+max_requests = 100000
+max_requests_jitter = 3000
+timeout = 1200
+graceful_timeout = 10
+preload_app = False
+capture_output = True
+keepalive = 30
+bind = '0.0.0.0:5000'
+workers = 3

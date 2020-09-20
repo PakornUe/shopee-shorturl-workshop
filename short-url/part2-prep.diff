@@ -1,0 +1,1039 @@
+diff --git a/acceptance-test/run.sh b/acceptance-test/run.sh
+new file mode 100755
+index 0000000..c2fe1ab
+--- /dev/null
++++ b/acceptance-test/run.sh
+@@ -0,0 +1,16 @@
++#!/usr/bin/env bash
++
++compatible_realpath () {
++	if command -v realpath &> /dev/null
++	then
++		realpath "$1"
++	else
++		[[ $1 = /* ]] && echo "$1" || echo "$PWD/${1#./}"
++	fi
++}
++
++FILE_PATH=$( compatible_realpath "$0" )
++DIR_PATH=$( dirname "$FILE_PATH" )
++ROOT_PATH=$( dirname "$DIR_PATH" )
++
++docker-compose --project-directory "$ROOT_PATH" run -T acceptance-test sh -c "python3 -m unittest"
+diff --git a/acceptance-test/tests/__init__.py b/acceptance-test/tests/__init__.py
+new file mode 100644
+index 0000000..8b13789
+--- /dev/null
++++ b/acceptance-test/tests/__init__.py
+@@ -0,0 +1 @@
++
+diff --git a/acceptance-test/tests/config.py b/acceptance-test/tests/config.py
+new file mode 100644
+index 0000000..86fc4f2
+--- /dev/null
++++ b/acceptance-test/tests/config.py
+@@ -0,0 +1,11 @@
++from os.path import join, dirname
++
++import yaml
++
++BASE_DIR = dirname(__file__)
++
++with open(join(dirname(__file__), '../conf/app.yml'), 'r') as f:
++	Conf = yaml.safe_load(f)
++
++def get_site_url() -> str:
++	return Conf['app']['site']
+diff --git a/acceptance-test/tests/test_short_url.py b/acceptance-test/tests/test_short_url.py
+new file mode 100644
+index 0000000..4ec6b65
+--- /dev/null
++++ b/acceptance-test/tests/test_short_url.py
+@@ -0,0 +1,107 @@
++from datetime import datetime
++import unittest
++
++import requests
++
++from . import config
++
++class ShortenRequester(object):
++	def __init__(self):
++		self.host = "http://nginx:80"
++		self.shorten_url = self.host + "/urls"
++		self.resolve_url = self.host + "/"
++
++	def create(self, url: str) -> (str, int):
++		response = requests.post(self.shorten_url, json={"url": url})
++		data = response.json()
++		return data.get("short_url"), response.status_code
++
++	def resolve(self, url: str) -> (str, int):
++		response = requests.get(self.resolve_url + url)
++		data = response.json()
++		return data.get("url"), response.status_code
++
++class TestShortenAndResolve(unittest.TestCase):
++	URL = "https://www.google.com/search?q="
++	SUCCESS_CODE = 200
++	NOT_FOUND_CODE = 404
++	FAIL_CODE = 500
++
++	def setUp(self) -> None:
++		self.shorten_requester = ShortenRequester()
++		self.short_url_prefix = config.get_site_url()
++
++	def _generate_url(self, suffix: str = None) -> str:
++		url = self.URL + str(datetime.now().timestamp())
++		if suffix is not None:
++			url += "+" + suffix
++		return url
++
++	def _assert_and_get_short_key(self, short_url: str, status_code: int) -> str:
++		self.assertEqual(status_code, self.SUCCESS_CODE, "Not success (200) status code returned for create.")
++		self.assertIsNotNone(short_url, "'short_url' not found in the create response.")
++		self.assertEqual(self.short_url_prefix, short_url[:len(self.short_url_prefix)], "Short url don't have required prefix.")
++		short_key = short_url[len(self.short_url_prefix):]
++		self.assertNotEqual(short_key, "", "short_key is empty in short_url")
++		return short_key
++
++	def _assert_resolve(self, resolved_url: str, status_code: int, init_url: str = None) -> None:
++		self.assertEqual(status_code, self.SUCCESS_CODE, "Not success (200) status code returned fpr resolve.")
++		self.assertIsNotNone(resolved_url, "'url' not found in the resolve response.")
++		if init_url is not None:
++			self.assertEqual(init_url, resolved_url, "Initial url and resolved urls are not same.")
++
++	def test_create(self):
++		short_url, status_code = self.shorten_requester.create(self._generate_url())
++		self._assert_and_get_short_key(short_url, status_code)
++
++	def test_create_and_resolve(self):
++		url = self._generate_url()
++		short_url, status_code = self.shorten_requester.create(url)
++		short_key = self._assert_and_get_short_key(short_url, status_code)
++
++		resolved_url, status_code = self.shorten_requester.resolve(short_key)
++		self._assert_resolve(resolved_url, status_code, init_url=url)
++
++	def test_create_two_times(self):
++		url = self._generate_url()
++
++		short_url_1, status_code_1 = self.shorten_requester.create(url)
++		self._assert_and_get_short_key(short_url_1, status_code_1)
++
++		short_url_2, status_code_2 = self.shorten_requester.create(url)
++		self._assert_and_get_short_key(short_url_2, status_code_2)
++
++	def test_unordered_create_and_resolve(self):
++		url_1 = self._generate_url(suffix="1")
++		short_url_1, status_code_1 = self.shorten_requester.create(url_1)
++		short_key_1 = self._assert_and_get_short_key(short_url_1, status_code_1)
++
++		url_2 = self._generate_url(suffix="2")
++		short_url_2, status_code_2 = self.shorten_requester.create(url_2)
++		short_key_2 = self._assert_and_get_short_key(short_url_2, status_code_2)
++
++		url_3 = self._generate_url(suffix="3")
++		short_url_3, status_code_3 = self.shorten_requester.create(url_3)
++		short_key_3 = self._assert_and_get_short_key(short_url_3, status_code_3)
++
++		resolved_url_2, status_code_2 = self.shorten_requester.resolve(short_key_2)
++		self._assert_resolve(resolved_url_2, status_code_2, init_url=url_2)
++
++		resolved_url_1, status_code_1 = self.shorten_requester.resolve(short_key_1)
++		self._assert_resolve(resolved_url_1, status_code_1, init_url=url_1)
++
++		resolved_url_3, status_code_3 = self.shorten_requester.resolve(short_key_3)
++		self._assert_resolve(resolved_url_3, status_code_3, init_url=url_3)
++
++	def test_create_not_valid_url(self):
++		url = "iamaninvalidurl"
++
++		_, status_code = self.shorten_requester.create(url)
++		self.assertNotEqual(status_code, self.SUCCESS_CODE, "Success (200) status code returned.")
++
++	def test_resolve_not_found_short_url(self):
++		short_key = "not_found+" + str(datetime.now().timestamp())
++
++		_, status_code = self.shorten_requester.resolve(short_key)
++		self.assertEqual(status_code, self.NOT_FOUND_CODE, "Not 'not found' (404) status code returned for invalid short key.")
+diff --git a/conf/app.yml b/conf/app.yml
+new file mode 100644
+index 0000000..0a8e6e0
+--- /dev/null
++++ b/conf/app.yml
+@@ -0,0 +1,18 @@
++flask:
++  DEBUG: False
++
++database:
++  name_or_url: mysql://client:password@mysql/short_url_db
++  echo: False
++  isolation_level: REPEATABLE READ
++
++redis:
++  host: redis
++  port: 6379
++  db: 0
++  max_connections: 1000
++  encoding: utf8
++  decode_responses: True
++
++app:
++  site: http://localhost:8080
+diff --git a/conf/logging.ini b/conf/logging.ini
+new file mode 100644
+index 0000000..f11f158
+--- /dev/null
++++ b/conf/logging.ini
+@@ -0,0 +1,48 @@
++[loggers]
++keys=root,sqlLogger
++
++[formatters]
++keys=defaultFormatter,sqlLogFormatter
++
++[handlers]
++keys=rootHandler,errorHandler,sqlLogHandler
++
++[logger_root]
++level=INFO
++handlers=rootHandler,errorHandler
++qualname=
++
++[logger_sqlLogger]
++level=INFO
++handlers=sqlLogHandler
++propagate=0
++qualname=sql
++
++[handler_rootHandler]
++class=logging.handlers.TimedRotatingFileHandler
++level=INFO
++encoding=utf-8
++formatter=defaultFormatter
++args=('../logs/root.log','D')
++
++[handler_errorHandler]
++class=logging.handlers.TimedRotatingFileHandler
++level=WARN
++encoding=utf-8
++formatter=defaultFormatter
++args=('../logs/error.log','D')
++
++[handler_sqlLogHandler]
++class=logging.handlers.TimedRotatingFileHandler
++level=INFO
++encoding=utf-8
++formatter=sqlLogFormatter
++args=('../logs/sql.log','D')
++
++[formatter_defaultFormatter]
++format=%(levelname)s %(asctime)s %(name)s:%(lineno)d %(message)s
++datefmt=
++
++[formatter_sqlLogFormatter]
++format=%(levelname)s %(asctime)s %(message)s
++datefmt=
+diff --git a/db/create-schema.sh b/db/create-schema.sh
+new file mode 100755
+index 0000000..3f482c3
+--- /dev/null
++++ b/db/create-schema.sh
+@@ -0,0 +1,17 @@
++#!/usr/bin/env bash
++
++compatible_realpath () {
++	if command -v realpath &> /dev/null
++	then
++		realpath "$1"
++	else
++		[[ $1 = /* ]] && echo "$1" || echo "$PWD/${1#./}"
++	fi
++}
++
++FILE_PATH=$( compatible_realpath "$0" )
++DIR_PATH=$( dirname "$FILE_PATH" )
++ROOT_PATH=$( dirname "$DIR_PATH" )
++SQL_PATH=${DIR_PATH}/schema.sql
++
++docker-compose --project-directory "$ROOT_PATH" exec -T mysql sh -c 'exec mysql -uclient -p"password"' < "$SQL_PATH"
+diff --git a/db/schema.sql b/db/schema.sql
+new file mode 100644
+index 0000000..705084d
+--- /dev/null
++++ b/db/schema.sql
+@@ -0,0 +1,13 @@
++DROP TABLE IF EXISTS `short_url_db`.`urls_tab`;
++
++CREATE TABLE `short_url_db`.`urls_tab` (
++    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
++    `url` VARCHAR(2083) NOT NULL,
++    `short_key` VARCHAR(32) NOT NULL,
++    `hashed_url` BINARY(20) NOT NULL,
++    `ctime` INT UNSIGNED NOT NULL,
++    PRIMARY KEY (`id`)
++) collate='utf8mb4_bin' ENGINE=InnoDB;
++ 
++CREATE UNIQUE INDEX idx_short_key ON `short_url_db`.`urls_tab` (short_key);
++CREATE INDEX idx_hashed_url ON `short_url_db`.`urls_tab` (hashed_url);
+diff --git a/docker-compose.yaml b/docker-compose.yaml
+index a142681..5c4537f 100644
+--- a/docker-compose.yaml
++++ b/docker-compose.yaml
+@@ -31,6 +31,8 @@ services:
+       context: ./dockerfiles/nginx
+     ports:
+       - 8080:80
++    volumes:
++      - ./logs:/var/log/nginx
+ 
+   short-url:
+     cap_add:
+diff --git a/dockerfiles/nginx/nginx.conf b/dockerfiles/nginx/nginx.conf
+index b39bf2d..a32201c 100644
+--- a/dockerfiles/nginx/nginx.conf
++++ b/dockerfiles/nginx/nginx.conf
+@@ -2,7 +2,7 @@
+ user  nginx;
+ worker_processes  1;
+ 
+-error_log  /var/log/nginx/error.log warn;
++error_log  /var/log/nginx/nginx.error.log warn;
+ pid        /var/run/nginx.pid;
+ 
+ 
+@@ -20,9 +20,9 @@ http {
+ 
+     log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                       '$status $body_bytes_sent "$http_referer" '
+-                      '"$http_user_agent" "$http_x_forwarded_for"';
++                      '"$http_user_agent" "$http_x_forwarded_for" $request_time';
+ 
+-    access_log  /var/log/nginx/access.log  main;
++    access_log  /var/log/nginx/nginx.access.log  main;
+ 
+     sendfile        on;
+     #tcp_nopush     on;
+diff --git a/src/accessors/__init__.py b/src/accessors/__init__.py
+new file mode 100644
+index 0000000..99dea6f
+--- /dev/null
++++ b/src/accessors/__init__.py
+@@ -0,0 +1,13 @@
++from typing import Optional, Tuple
++
++
++class UrlsTabAccessor:
++
++    def create(self, short_key: str, url: str) -> int:
++        raise NotImplementedError
++
++    def find_last_by_short_key(self, short_key: str) -> Optional[str]:
++        raise NotImplementedError
++
++    def find_match_by_url(self, url: str) -> Tuple[Optional[str], Optional[str]]:
++        raise NotImplementedError
+diff --git a/src/accessors/urls_tab.py b/src/accessors/urls_tab.py
+new file mode 100644
+index 0000000..0ad0ea1
+--- /dev/null
++++ b/src/accessors/urls_tab.py
+@@ -0,0 +1,57 @@
++import hashlib
++from typing import Optional, Tuple
++
++from sqlalchemy import desc
++
++from accessors import UrlsTabAccessor
++from db import session_ctx
++from db.tables import UrlsTab
++from utils.cache import RedisCache
++from utils.time import current_timestamp
++
++
++class MysqlUrlsTabAccessor(UrlsTabAccessor):
++
++    def create(self, short_key: str, url: str) -> int:
++        """
++        :return: id of the created record
++        """
++        record = UrlsTab(
++            url=url,
++            short_key=short_key,
++            hashed_url=self._url_hash(url),
++            ctime=current_timestamp()
++        )
++        with session_ctx() as session:
++            session.add(record)
++        return record.id
++
++    def find_last_by_short_key(self, short_key: str) -> Optional[str]:
++        with session_ctx() as session:
++            record = (
++                session.query(UrlsTab)
++                    .filter(UrlsTab.short_key == short_key)
++                    .order_by(desc(UrlsTab.ctime))
++                    .first()
++            )
++            url = record.url if record else None
++
++        return url
++
++    def find_match_by_url(self, url: str) -> Optional[Tuple[str, str]]:
++        url_hash = self._url_hash(url)
++        with session_ctx() as session:
++            records = (
++                session.query(UrlsTab)
++                .filter(UrlsTab.hashed_url == url_hash)
++                .order_by(desc(UrlsTab.ctime))
++                .all()
++            )
++        match = next((record for record in records if record.url == url), None)
++        if match is not None:
++            return match.short_key, url
++        return None, None
++
++    @staticmethod
++    def _url_hash(url):
++        return bytearray.fromhex(hashlib.sha1(str.encode(url)).hexdigest())
+diff --git a/src/api.py b/src/api.py
+new file mode 100644
+index 0000000..be772d1
+--- /dev/null
++++ b/src/api.py
+@@ -0,0 +1,50 @@
++import logging
++import traceback
++
++from flask import Flask
++
++from accessors.urls_tab import MysqlUrlsTabAccessor
++from common.exceptions import ShortUrlException
++from conf import Conf
++from managers.default import DefaultShortUrlManager
++from managers.generators.default import ShortKeyGenerator
++from routes import add_short_url_routes
++from views.shorten import ShortUrlsView
++
++
++def init_configs(_app):
++    _app.config.update(Conf['flask'])
++
++
++def create_urls_view():
++    urls_tab_accessor = MysqlUrlsTabAccessor()
++    generator = ShortKeyGenerator()
++    short_url_manager = DefaultShortUrlManager(urls_tab_accessor, generator)
++    short_urls_view = ShortUrlsView(short_url_manager)
++    return short_urls_view
++
++
++def add_routes(_app):
++    add_short_url_routes(_app, view=create_urls_view())
++
++
++def create_app():
++    _app = Flask(__name__)
++    init_configs(_app)
++    add_routes(_app)
++    return _app
++
++
++app = create_app()
++
++
++@app.errorhandler(Exception)
++def exception_handler(error):
++    """
++    Handle all uncaught exceptions.
++    """
++    if isinstance(error, (ShortUrlException,)):
++        return {'error': error.message}, 500
++
++    logging.error(''.join(traceback.format_exception(type(error), error, error.__traceback__)))
++    return {'error': 'system busy'}, 500
+diff --git a/src/common/__init__.py b/src/common/__init__.py
+new file mode 100644
+index 0000000..8b13789
+--- /dev/null
++++ b/src/common/__init__.py
+@@ -0,0 +1 @@
++
+diff --git a/src/common/exceptions.py b/src/common/exceptions.py
+new file mode 100644
+index 0000000..be28ef7
+--- /dev/null
++++ b/src/common/exceptions.py
+@@ -0,0 +1,5 @@
++class ShortUrlException(Exception):
++
++    def __init__(self, message, *args):
++        super().__init__(message, *args)
++        self.message = message
+diff --git a/src/conf.py b/src/conf.py
+new file mode 100644
+index 0000000..fdd1751
+--- /dev/null
++++ b/src/conf.py
+@@ -0,0 +1,11 @@
++import logging.config
++from os.path import join, dirname
++
++import yaml
++
++BASE_DIR = dirname(__file__)
++
++with open(join(dirname(__file__), '../conf/app.yml'), 'r') as f:
++    Conf = yaml.safe_load(f)
++
++logging.config.fileConfig(join(BASE_DIR, '../conf/logging.ini'))
+diff --git a/src/config.py b/src/config.py
+new file mode 100644
+index 0000000..ef8dd57
+--- /dev/null
++++ b/src/config.py
+@@ -0,0 +1,11 @@
++backlog = 2048
++worker_class = 'sync'
++max_requests = 100000
++max_requests_jitter = 3000
++timeout = 1200
++graceful_timeout = 10
++preload_app = False
++capture_output = True
++keepalive = 30
++bind = '0.0.0.0:5000'
++workers = 3
+diff --git a/src/db/__init__.py b/src/db/__init__.py
+new file mode 100644
+index 0000000..b21dc6b
+--- /dev/null
++++ b/src/db/__init__.py
+@@ -0,0 +1,45 @@
++import atexit
++import logging
++import time
++from contextlib import contextmanager
++
++from sqlalchemy import create_engine, event
++from sqlalchemy.engine import Engine
++from sqlalchemy.orm import sessionmaker
++from sqlalchemy.pool import NullPool
++
++from conf import Conf
++
++engine = create_engine(**Conf['database'], poolclass=NullPool)
++Session = sessionmaker(bind=engine)
++sqlLogger = logging.getLogger('sql')
++
++
++@contextmanager
++def session_ctx(s=Session()):
++    try:
++        yield s
++        s.flush()
++        s.expunge_all()
++        s.commit()
++    except:
++        s.rollback()
++        raise
++    finally:
++        s.close()
++
++
++@atexit.register
++def close_pool():
++    engine.dispose()
++
++
++@event.listens_for(Engine, "before_cursor_execute")
++def before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
++    conn.info.setdefault('query_start_time', []).append(time.time())
++
++
++@event.listens_for(Engine, "after_cursor_execute")
++def after_cursor_execute(conn, cursor, statement, parameters, context, executemany):
++    total = time.time() - conn.info['query_start_time'].pop(-1)
++    sqlLogger.debug('%.1f %s', total * 1000, statement)
+diff --git a/src/db/tables.py b/src/db/tables.py
+new file mode 100644
+index 0000000..54b7abd
+--- /dev/null
++++ b/src/db/tables.py
+@@ -0,0 +1,14 @@
++from sqlalchemy import Column, Integer, String, Binary
++from sqlalchemy.ext.declarative import declarative_base
++
++Base = declarative_base()
++
++
++class UrlsTab(Base):
++    __tablename__ = 'urls_tab'
++
++    id = Column(Integer, primary_key=True)
++    url = Column(String(2083))
++    short_key = Column(String(32))
++    hashed_url = Column(Binary(20))
++    ctime = Column(Integer)
+diff --git a/src/managers/__init__.py b/src/managers/__init__.py
+new file mode 100644
+index 0000000..7c7d7e8
+--- /dev/null
++++ b/src/managers/__init__.py
+@@ -0,0 +1,26 @@
++from accessors import UrlsTabAccessor
++from common.exceptions import ShortUrlException
++from managers.generators import AbstractShortKeyGenerator
++
++
++class ShortUrlManager:
++
++    def __init__(self, urls_tab_accessor: UrlsTabAccessor, short_key_generator: AbstractShortKeyGenerator):
++        self.urls_tab_accessor = urls_tab_accessor
++        self.short_key_generator = short_key_generator
++
++    def resolve(self, short_key: str) -> str:
++        """
++        Return the latest source url for the short key.
++        """
++        raise NotImplementedError
++
++    def create(self, url: str) -> str:
++        """
++        Return a short key for the url.
++        """
++        raise NotImplementedError
++
++
++class NotFoundException(ShortUrlException):
++    pass
+diff --git a/src/managers/default.py b/src/managers/default.py
+new file mode 100644
+index 0000000..76ffa60
+--- /dev/null
++++ b/src/managers/default.py
+@@ -0,0 +1,34 @@
++from accessors import UrlsTabAccessor
++from managers import ShortUrlManager, NotFoundException
++from managers.generators import UniqueShortKeyGenerator
++
++
++class DefaultShortUrlManager(ShortUrlManager):
++
++    def __init__(self, urls_tab_accessor: UrlsTabAccessor, short_key_generator: UniqueShortKeyGenerator):
++        super().__init__(urls_tab_accessor, short_key_generator)
++
++    def resolve(self, short_key: str) -> str:
++        """
++        Return the latest source url for the short key.
++        """
++        url = self.urls_tab_accessor.find_last_by_short_key(short_key)
++        if url is None:
++            raise NotFoundException(f'url not found for short_key: {short_key}')
++        return url
++
++    def create(self, url: str) -> str:
++        """
++        Return a short key for the url.
++        """
++        short_key, matched = self.urls_tab_accessor.find_match_by_url(url)
++        if matched == url:
++            return short_key
++
++        # just create a new short_key
++        return self._generate_new_short_key(url)
++
++    def _generate_new_short_key(self, url):
++        short_key = self.short_key_generator.generate(url)
++        self.urls_tab_accessor.create(short_key, url)
++        return short_key
+diff --git a/src/managers/generators/__init__.py b/src/managers/generators/__init__.py
+new file mode 100644
+index 0000000..b5f463e
+--- /dev/null
++++ b/src/managers/generators/__init__.py
+@@ -0,0 +1,12 @@
++class AbstractShortKeyGenerator:
++
++    def generate(self, url) -> str:
++        raise NotImplementedError
++
++
++class RandomShortKeyGenerator(AbstractShortKeyGenerator):
++    pass
++
++
++class UniqueShortKeyGenerator(AbstractShortKeyGenerator):
++    pass
+diff --git a/src/managers/generators/default.py b/src/managers/generators/default.py
+new file mode 100644
+index 0000000..057f7cb
+--- /dev/null
++++ b/src/managers/generators/default.py
+@@ -0,0 +1,7 @@
++from managers import AbstractShortKeyGenerator
++
++
++class ShortKeyGenerator(AbstractShortKeyGenerator):
++
++    def generate(self, url) -> str:
++        raise NotImplementedError
+diff --git a/src/routes.py b/src/routes.py
+new file mode 100644
+index 0000000..74e612b
+--- /dev/null
++++ b/src/routes.py
+@@ -0,0 +1,3 @@
++def add_short_url_routes(app, view):
++    app.add_url_rule('/urls', view_func=view.create_short_url, methods=['POST'])
++    app.add_url_rule('/<short_key>', view_func=view.get_short_url, methods=['GET'])
+diff --git a/src/tests/__init__.py b/src/tests/__init__.py
+new file mode 100644
+index 0000000..8b13789
+--- /dev/null
++++ b/src/tests/__init__.py
+@@ -0,0 +1 @@
++
+diff --git a/src/tests/managers/__init__.py b/src/tests/managers/__init__.py
+new file mode 100644
+index 0000000..8b13789
+--- /dev/null
++++ b/src/tests/managers/__init__.py
+@@ -0,0 +1 @@
++
+diff --git a/src/tests/managers/test_shorten_manager.py b/src/tests/managers/test_shorten_manager.py
+new file mode 100644
+index 0000000..a59078e
+--- /dev/null
++++ b/src/tests/managers/test_shorten_manager.py
+@@ -0,0 +1,56 @@
++import unittest
++from typing import Optional, Tuple
++
++from accessors import UrlsTabAccessor
++from managers.default import DefaultShortUrlManager
++from managers.generators import AbstractShortKeyGenerator
++
++
++class MockUrlsTabAccessor(UrlsTabAccessor):
++
++    def __init__(self):
++        self.short_key_mapping = {}
++        self.url_mapping = {}
++        self.counter = 0
++
++    def create(self, short_key: str, url: str) -> int:
++        self.short_key_mapping.update({short_key: url})
++        self.url_mapping.update({url: short_key})
++        self.counter += 1
++        return self.counter
++
++    def find_last_by_short_key(self, short_key: str) -> Optional[str]:
++        return self.short_key_mapping.get(short_key, None)
++
++    def find_match_by_url(self, url: str) -> Tuple[Optional[str], Optional[str]]:
++        short_key = self.url_mapping.get(url, None)
++        return (short_key, self.short_key_mapping.get(short_key)) if short_key else (None, None)
++
++
++class MockShortKeyGenerator(AbstractShortKeyGenerator):
++    def __init__(self):
++        self.uid = 0
++
++    def generate(self, url) -> str:
++        self.uid += 1
++        return str(self.uid)
++
++
++class TestDefaultShortenManager(unittest.TestCase):
++    URLS = [
++        'http://localhost',
++        'http://127.0.0.1/',
++        'https://stackoverflow.com/questions/14668348/python-random-url-choice',
++        'https://www.google.com/webhp?hl=zh-CN&sa=X&ved=0ahUKEwj0reCtw8zrAhVWfSsKHekFBysQPAgI',
++    ]
++
++    def setUp(self) -> None:
++        mock_urls_tab_accessor = MockUrlsTabAccessor()
++        mock_short_key_generator = MockShortKeyGenerator()
++        self.shorten_manager = DefaultShortUrlManager(mock_urls_tab_accessor, mock_short_key_generator)
++
++    def test_shorten_resolve(self):
++        for url in self.URLS:
++            short_key = self.shorten_manager.create(url)
++            resolved = self.shorten_manager.resolve(short_key)
++            self.assertEqual(url, resolved)
+diff --git a/src/utils/__init__.py b/src/utils/__init__.py
+new file mode 100644
+index 0000000..8b13789
+--- /dev/null
++++ b/src/utils/__init__.py
+@@ -0,0 +1 @@
++
+diff --git a/src/utils/base62.py b/src/utils/base62.py
+new file mode 100644
+index 0000000..7fadd0d
+--- /dev/null
++++ b/src/utils/base62.py
+@@ -0,0 +1,21 @@
++ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
++R_ALPHABET = {c: i for i, c in enumerate(ALPHABET)}
++_BASE = len(ALPHABET)
++
++
++def encode(base10_num: int) -> str:
++    num = base10_num
++    r = []
++    while num > 0:
++        num, rem = divmod(num, _BASE)
++        r.append(ALPHABET[rem])
++    r.reverse()
++    return ''.join(r)
++
++
++def decode(num: str) -> int:
++    r = 0
++    n = len(num)
++    for i, c in enumerate(num):
++        r += R_ALPHABET[c] * (_BASE ** (n - i - 1))
++    return r
+diff --git a/src/utils/cache.py b/src/utils/cache.py
+new file mode 100644
+index 0000000..cf64cb1
+--- /dev/null
++++ b/src/utils/cache.py
+@@ -0,0 +1,22 @@
++from utils.redis import redis_client
++
++
++class RedisCache:
++    _SPACE = 'short'
++    SEP = ':'
++
++    def __init__(self, space):
++        self.space = space
++
++    @property
++    def cache(self):
++        return redis_client()
++
++    def set(self, k: str, v: str, nx: bool = False):
++        self.cache.set(self._wrap(k), v, nx=nx)
++
++    def get(self, k: str) -> str:
++        return self.cache.get(self._wrap(k))
++
++    def _wrap(self, k: str) -> str:
++        return self.SEP.join([self._SPACE, self.space, k])
+diff --git a/src/utils/rand.py b/src/utils/rand.py
+new file mode 100644
+index 0000000..b5bdf74
+--- /dev/null
++++ b/src/utils/rand.py
+@@ -0,0 +1,6 @@
++import random
++import string
++
++
++def random_string(n=10):
++    return ''.join(random.choice(string.printable) for _ in range(n))
+diff --git a/src/utils/redis.py b/src/utils/redis.py
+new file mode 100644
+index 0000000..6c94d78
+--- /dev/null
++++ b/src/utils/redis.py
+@@ -0,0 +1,9 @@
++import redis
++
++from conf import Conf
++
++redis_connection_pool = redis.ConnectionPool(**Conf['redis'])
++
++
++def redis_client():
++    return redis.StrictRedis(connection_pool=redis_connection_pool)
+diff --git a/src/utils/snowflake.py b/src/utils/snowflake.py
+new file mode 100644
+index 0000000..688e469
+--- /dev/null
++++ b/src/utils/snowflake.py
+@@ -0,0 +1,85 @@
++"""
++snowflake id generator
++
++copied from:
++https://github.com/twitter-archive/snowflake/blob/snowflake-2010/src/main/scala/com/twitter/service/snowflake/IdWorker.scala\
++"""
++import atexit
++import threading
++import time
++
++import redis_lock
++
++from utils.redis import redis_client
++
++
++class SnowflakeClient:
++    WORKER_ID_BITS = 5
++    DATA_CENTER_ID_BITS = 0
++    SEQUENCE_BITS = 9
++
++    WORKER_SHIFT_BITS = SEQUENCE_BITS
++    DATA_CENTER_SHIFT_BITS = WORKER_ID_BITS + SEQUENCE_BITS
++    TIMESTAMP_SHIFT_BITS = DATA_CENTER_ID_BITS + WORKER_ID_BITS + SEQUENCE_BITS
++
++    SEQUENCE_MASK = (1 << SEQUENCE_BITS) - 1
++
++    TWEPOCH = 1599636698000
++
++    def __init__(self, data_center_id: int, worker_id: int):
++        self._lock = threading.Lock()
++        self._last_timestamp = -1
++        self._sequence = 0
++        self.data_center_id = data_center_id
++        self.worker_id = worker_id
++        self._worker_uid = (
++                (self.data_center_id << self.DATA_CENTER_SHIFT_BITS) |
++                (self.worker_id << self.WORKER_SHIFT_BITS)
++        )
++        self._worker_lock = redis_lock.Lock(redis_client(), self.worker_identity)
++        self.register()
++
++    @property
++    def worker_identity(self):
++        return f'snowflake-{self.data_center_id}-{self.worker_id}'
++
++    def unregister(self):
++        try:
++            self._worker_lock.release()
++        except:
++            pass
++
++    def register(self):
++        atexit.register(self.unregister)
++        self._worker_lock.acquire(blocking=False)
++
++    def next_id(self) -> int:
++        with self._lock:
++            timestamp = self._timestamp()
++            if timestamp < self._last_timestamp:
++                raise Exception(
++                    'Clock moved backwards, refuse to generate id for %s ms' % (timestamp - self._last_timestamp)
++                )
++            elif timestamp == self._last_timestamp:
++                self._sequence = (self._sequence + 1) & self.SEQUENCE_MASK
++                if self._sequence == 0:
++                    timestamp = self._til_next_millis(self._last_timestamp)
++                else:
++                    self._sequence = 0
++            else:
++                self._sequence = 0
++
++            self._last_timestamp = timestamp
++
++            return ((timestamp - self.TWEPOCH) << self.TIMESTAMP_SHIFT_BITS) | self._worker_uid | self._sequence
++
++    @classmethod
++    def _timestamp(cls) -> int:
++        return int(1000 * time.time())
++
++    @classmethod
++    def _til_next_millis(cls, lts) -> int:
++        ts = cls._timestamp()
++        while ts <= lts:
++            ts = cls._timestamp()
++        return ts
+diff --git a/src/utils/time.py b/src/utils/time.py
+new file mode 100644
+index 0000000..845223d
+--- /dev/null
++++ b/src/utils/time.py
+@@ -0,0 +1,5 @@
++import time
++
++
++def current_timestamp():
++    return int(time.time())
+diff --git a/src/utils/validators.py b/src/utils/validators.py
+new file mode 100644
+index 0000000..392136e
+--- /dev/null
++++ b/src/utils/validators.py
+@@ -0,0 +1,7 @@
++from typing import Optional
++
++from validator_collection import checkers
++
++
++def is_valid_url(s: Optional[str]) -> bool:
++    return checkers.is_url(s, allow_special_ips=True)
+diff --git a/src/views/__init__.py b/src/views/__init__.py
+new file mode 100644
+index 0000000..8b13789
+--- /dev/null
++++ b/src/views/__init__.py
+@@ -0,0 +1 @@
++
+diff --git a/src/views/shorten.py b/src/views/shorten.py
+new file mode 100644
+index 0000000..9c8f055
+--- /dev/null
++++ b/src/views/shorten.py
+@@ -0,0 +1,34 @@
++from flask import request
++
++from common.exceptions import ShortUrlException
++from conf import Conf
++from managers import ShortUrlManager, NotFoundException
++from utils.validators import is_valid_url
++
++
++class ShortUrlsView:
++    _SITE = Conf['app']['site']
++
++    def __init__(self, short_url_manager: ShortUrlManager):
++        self.short_url_manager = short_url_manager
++
++    def create_short_url(self):
++        data = request.get_json()
++        url = data.get('url', None)
++        if not is_valid_url(url):
++            raise ShortUrlException('invalid source url')
++
++        short_key = self.short_url_manager.create(url)
++        short_url = self._build_url(short_key)
++
++        return {'short_url': short_url}
++
++    def get_short_url(self, short_key):
++        try:
++            url = self.short_url_manager.resolve(short_key)
++            return {'url': url}
++        except NotFoundException as e:
++            return {'error': e.message}, 404
++
++    def _build_url(self, short_key: str) -> str:
++        return f'{self._SITE}/{short_key}'
+diff --git a/unit-test/run.sh b/unit-test/run.sh
+new file mode 100755
+index 0000000..81e6d2f
+--- /dev/null
++++ b/unit-test/run.sh
+@@ -0,0 +1,16 @@
++#!/usr/bin/env bash
++
++compatible_realpath () {
++	if command -v realpath &> /dev/null
++	then
++		realpath "$1"
++	else
++		[[ $1 = /* ]] && echo "$1" || echo "$PWD/${1#./}"
++	fi
++}
++
++FILE_PATH=$( compatible_realpath "$0" )
++DIR_PATH=$( dirname "$FILE_PATH" )
++ROOT_PATH=$( dirname "$DIR_PATH" )
++
++docker-compose --project-directory "$ROOT_PATH" run -T short-url sh -c "python3 -m unittest"
